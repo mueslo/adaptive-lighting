@@ -111,6 +111,7 @@ from homeassistant.const import (
     SERVICE_TURN_ON,
     STATE_OFF,
     STATE_ON,
+    EntityCategory,
 )
 from homeassistant.const import __version__ as ha_version
 from homeassistant.core import Context, Event, HomeAssistant, State
@@ -3235,3 +3236,61 @@ async def test_detect_non_ha_changes_with_separate_turn_on_commands(hass):
     assert (
         light.brightness == manual_brightness
     ), f"AL overrode manual brightness {manual_brightness} with {al_brightness}"
+
+
+async def test_service_light_excluded_from_area_intercept_turn_on(hass):
+    """A service light (entity_category set) in an area must stay off.
+
+    Regression test for #1510: when Adaptive Lighting intercepts an area
+    `light.turn_on`, it must not re-issue `turn_on` for entities that Home
+    Assistant itself excludes from area expansion (entities with an
+    `entity_category`, e.g. the Home Assistant Voice LED ring). The managed
+    lights must still turn on and be adapted.
+    """
+    await setup_lights(hass)
+    mock_area_registry(hass)
+
+    reg = entity_registry.async_get(hass)
+    for light in (ENTITY_LIGHT_1, ENTITY_LIGHT_2, ENTITY_LIGHT_3):
+        entry = reg.async_get(light)
+        reg.async_get_or_create(LIGHT_DOMAIN, "template", entry.unique_id)
+        reg.async_update_entity(light, area_id="test-area")
+
+    defaults = {
+        CONF_SUNRISE_TIME: datetime.time(SUNRISE.hour),
+        CONF_SUNSET_TIME: datetime.time(SUNSET.hour),
+        CONF_INITIAL_TRANSITION: 0,
+        CONF_TRANSITION: 0,
+        CONF_DETECT_NON_HA_CHANGES: True,
+        CONF_INTERCEPT: True,
+    }
+    _, switch1 = await setup_switch(
+        hass, {CONF_NAME: "switch1", CONF_LIGHTS: [ENTITY_LIGHT_1], **defaults},
+    )
+    _, switch2 = await setup_switch(
+        hass, {CONF_NAME: "switch2", CONF_LIGHTS: [ENTITY_LIGHT_2], **defaults},
+    )
+    assert hass.states.get(switch1.entity_id).state == STATE_ON
+    assert hass.states.get(switch2.entity_id).state == STATE_ON
+
+    # Mark the unmanaged light as a "service" light (entity_category set).
+    reg.async_update_entity(
+        ENTITY_LIGHT_3, entity_category=EntityCategory.CONFIG,
+    )
+    assert reg.async_get(ENTITY_LIGHT_3).entity_category == EntityCategory.CONFIG
+
+    # Turn on the whole area via the area target.
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_AREA_ID: "test-area"},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    # Managed lights are turned on (and adapted) by AL's intercept.
+    assert hass.states.get(ENTITY_LIGHT_1).state == STATE_ON
+    assert hass.states.get(ENTITY_LIGHT_2).state == STATE_ON
+    # The service light is excluded by HA's area expansion AND by AL's
+    # re-issue filter, so it must remain off.
+    assert hass.states.get(ENTITY_LIGHT_3).state == STATE_OFF

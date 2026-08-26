@@ -1830,6 +1830,28 @@ class AdaptiveLightingManager:
         self._context_cnt += 1
         return context
 
+    def _is_service_light(self, entity_id: str) -> bool:
+        """Return True for "service" lights excluded from area turn-on.
+
+        Home Assistant itself excludes entities with an `entity_category`
+        (config/diagnostic) from area/device/label service-call expansion
+        (see core commit "Exclude hidden entities from targets"), so a
+        `light.turn_on` targeting an area never reaches them. We mirror that
+        rule via the entity registry: a light with a category set is not
+        normal room lighting and must not be turned on by the intercept. Such
+        lights stay in AL's `lights` (so they are still adapted when on) but
+        are excluded from the intercept-driven turn-on.
+
+        We read the category from the entity registry (authoritative) rather
+        than `state.attributes`, because registry-only attributes are not
+        always present on the recorded state.
+        """
+        ent_reg = entity_registry.async_get(self.hass)
+        entry = ent_reg.async_get(entity_id) if ent_reg is not None else None
+        if entry is None:
+            return False
+        return entry.entity_category is not None
+
     def _separate_entity_ids(
         self,
         entity_ids: list[str],
@@ -1887,7 +1909,16 @@ class AdaptiveLightingManager:
                     )
                     skipped.append(entity_id)
                 else:
-                    switch_to_eids.setdefault(switch, []).append(entity_id)
+                    is_service = self._is_service_light(entity_id)
+                    if is_service:
+                        _LOGGER.debug(
+                            "Service light '%s' excluded from intercept "
+                            "turn-on (kept managed for adaptation)",
+                            entity_id,
+                        )
+                        skipped.append(entity_id)
+                    if not is_service:
+                        switch_to_eids.setdefault(switch, []).append(entity_id)
         return switch_to_eids, skipped
 
     def _correct_for_multi_light_intercept(
@@ -1976,8 +2007,11 @@ class AdaptiveLightingManager:
             service_data,
         )
 
-        # Because `_service_interceptor_turn_on_single_light_handler` modifies the
-        # original service data, we need to make a copy of it to use in the `skipped` call
+        # The intercept below rewrites `call.data` to target only the managed
+        # lights (see `modify_service_data`), so HA's original `light.turn_on`
+        # handler will only turn on the managed lights. We therefore need a
+        # copy of the original service data to re-issue `turn_on` for the
+        # unmanaged (skipped) lights so they still come on.
         service_data_copy = deepcopy(service_data)
 
         entity_ids = self._get_entity_list(service_data)
@@ -2053,20 +2087,32 @@ class AdaptiveLightingManager:
                     transition=transition,
                 )
 
-        # Call light.turn_on service for skipped entities
-        if skipped:
-            if not has_intercepted:
-                assert set(skipped) == set(entity_ids)
-                return  # The call will be intercepted with the original data
-            # Call light turn_on service for skipped entities
+        # Re-issue `light.turn_on` for the skipped (unmanaged) lights so they
+        # still come on. The intercept rewrote `call.data` to target only the
+        # managed lights (see `modify_service_data`), so HA's original handler
+        # only turns on the managed ones; the unmanaged normal lights must be
+        # turned on explicitly here.
+        #
+        # IMPORTANT: "service" lights (entities with an `entity_category`,
+        # e.g. the Home Assistant Voice LED ring) are excluded from this
+        # re-issue. Home Assistant itself excludes such entities from
+        # area/label expansion, so it deliberately leaves them off; AL must
+        # not turn them on either. They remain in `self.lights` (if managed)
+        # and are still adapted when on.
+        skipped_normal = [eid for eid in skipped if not self._is_service_light(eid)]
+        if skipped_normal and has_intercepted:
             context = self.create_context("skipped")
             _LOGGER.debug(
-                "(5) _service_interceptor_turn_on_handler: calling `light.turn_on` with skipped='%s', service_data: '%s', context='%s'",
-                skipped,
+                "(5) _service_interceptor_turn_on_handler: calling `light.turn_on` "
+                "with skipped_normal='%s', service_data: '%s', context='%s'",
+                skipped_normal,
                 service_data_copy,  # This is the original service data
                 context.id,
             )
-            service_data = {ATTR_ENTITY_ID: skipped, **service_data_copy[CONF_PARAMS]}
+            service_data = {
+                ATTR_ENTITY_ID: skipped_normal,
+                **service_data_copy[CONF_PARAMS],
+            }
             await self.hass.services.async_call(
                 LIGHT_DOMAIN,
                 SERVICE_TURN_ON,
@@ -2074,6 +2120,10 @@ class AdaptiveLightingManager:
                 blocking=True,
                 context=context,
             )
+        # When `has_intercepted` is False there are no managed lights in this
+        # call, so `call.data` still carries the original area/label target and
+        # HA's own handler turns on the normal lights (and excludes service
+        # lights) — nothing to re-issue here.
 
     async def _service_interceptor_turn_on_single_light_handler(
         self,
