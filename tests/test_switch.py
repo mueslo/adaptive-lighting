@@ -3265,17 +3265,20 @@ async def test_service_light_excluded_from_area_intercept_turn_on(hass):
         CONF_INTERCEPT: True,
     }
     _, switch1 = await setup_switch(
-        hass, {CONF_NAME: "switch1", CONF_LIGHTS: [ENTITY_LIGHT_1], **defaults},
+        hass,
+        {CONF_NAME: "switch1", CONF_LIGHTS: [ENTITY_LIGHT_1], **defaults},
     )
     _, switch2 = await setup_switch(
-        hass, {CONF_NAME: "switch2", CONF_LIGHTS: [ENTITY_LIGHT_2], **defaults},
+        hass,
+        {CONF_NAME: "switch2", CONF_LIGHTS: [ENTITY_LIGHT_2], **defaults},
     )
     assert hass.states.get(switch1.entity_id).state == STATE_ON
     assert hass.states.get(switch2.entity_id).state == STATE_ON
 
     # Mark the unmanaged light as a "service" light (entity_category set).
     reg.async_update_entity(
-        ENTITY_LIGHT_3, entity_category=EntityCategory.CONFIG,
+        ENTITY_LIGHT_3,
+        entity_category=EntityCategory.CONFIG,
     )
     assert reg.async_get(ENTITY_LIGHT_3).entity_category == EntityCategory.CONFIG
 
