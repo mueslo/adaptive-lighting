@@ -3370,3 +3370,61 @@ async def test_service_light_excluded_from_area_intercept_toggle(hass):
     # The service light is excluded by HA's area expansion AND by AL's
     # re-issue filter, so it must remain off.
     assert hass.states.get(ENTITY_LIGHT_3).state == STATE_OFF
+
+
+async def test_service_light_turns_on_when_directly_targeted(hass):
+    """A directly targeted service light must still turn on.
+
+    Unlike area/device/label expansion, Home Assistant turns on a service
+    light (entity_category set) when it is *explicitly* named in `entity_id`.
+    AL must mirror that: a config-class light listed directly in a
+    `light.turn_on` call is turned on (matching HA), while the indirectly
+    expanded area case (see test_service_light_excluded_from_area_intercept_turn_on)
+    still leaves it off.
+    """
+    await setup_lights(hass)
+    mock_area_registry(hass)
+
+    reg = entity_registry.async_get(hass)
+    for light in (ENTITY_LIGHT_1, ENTITY_LIGHT_2, ENTITY_LIGHT_3):
+        entry = reg.async_get(light)
+        reg.async_get_or_create(LIGHT_DOMAIN, "template", entry.unique_id)
+        reg.async_update_entity(light, area_id="test-area")
+
+    defaults = {
+        CONF_SUNRISE_TIME: datetime.time(SUNRISE.hour),
+        CONF_SUNSET_TIME: datetime.time(SUNSET.hour),
+        CONF_INITIAL_TRANSITION: 0,
+        CONF_TRANSITION: 0,
+        CONF_DETECT_NON_HA_CHANGES: True,
+        CONF_INTERCEPT: True,
+    }
+    _, switch1 = await setup_switch(
+        hass, {CONF_NAME: "switch1", CONF_LIGHTS: [ENTITY_LIGHT_1], **defaults},
+    )
+    _, switch2 = await setup_switch(
+        hass, {CONF_NAME: "switch2", CONF_LIGHTS: [ENTITY_LIGHT_2], **defaults},
+    )
+    assert hass.states.get(switch1.entity_id).state == STATE_ON
+    assert hass.states.get(switch2.entity_id).state == STATE_ON
+
+    # Mark the unmanaged light as a "service" light (entity_category set).
+    reg.async_update_entity(
+        ENTITY_LIGHT_3, entity_category=EntityCategory.CONFIG,
+    )
+    assert reg.async_get(ENTITY_LIGHT_3).entity_category == EntityCategory.CONFIG
+
+    # Explicitly target all three lights (including the service light) by entity_id.
+    await hass.services.async_call(
+        LIGHT_DOMAIN,
+        SERVICE_TURN_ON,
+        {ATTR_ENTITY_ID: [ENTITY_LIGHT_1, ENTITY_LIGHT_2, ENTITY_LIGHT_3]},
+        blocking=True,
+    )
+    await hass.async_block_till_done()
+
+    # All three must be on: the managed lights are adapted, and the explicitly
+    # targeted service light is turned on to match HA's direct-target behavior.
+    assert hass.states.get(ENTITY_LIGHT_1).state == STATE_ON
+    assert hass.states.get(ENTITY_LIGHT_2).state == STATE_ON
+    assert hass.states.get(ENTITY_LIGHT_3).state == STATE_ON

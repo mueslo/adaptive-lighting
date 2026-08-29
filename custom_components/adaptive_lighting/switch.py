@@ -1831,16 +1831,21 @@ class AdaptiveLightingManager:
         return context
 
     def _is_service_light(self, entity_id: str) -> bool:
-        """Return True for "service" lights excluded from area turn-on.
+        """Return True for "service" lights excluded from *indirect* turn-on.
 
         Home Assistant itself excludes entities with an `entity_category`
         (config/diagnostic) from area/device/label service-call expansion
         (see core commit "Exclude hidden entities from targets"), so a
-        `light.turn_on` targeting an area never reaches them. We mirror that
-        rule via the entity registry: a light with a category set is not
-        normal room lighting and must not be turned on by the intercept. Such
-        lights stay in AL's `lights` (so they are still adapted when on) but
-        are excluded from the intercept-driven turn-on.
+        `light.turn_on` targeting an area never reaches them. When a service
+        light is *explicitly* named in `entity_id`, however, HA does turn it
+        on — so AL must too (handled by the caller, which only applies this
+        filter to indirectly-expanded entities).
+
+        A light with a category set is not normal room lighting and must not be
+        turned on by the intercept when reached via area/device/label
+        expansion. Such lights stay in AL's `lights` (so they are still adapted
+        when on) but are excluded from the intercept-driven turn-on in that
+        case.
 
         We read the category from the entity registry (authoritative) rather
         than `state.attributes`, because registry-only attributes are not
@@ -1856,6 +1861,7 @@ class AdaptiveLightingManager:
         self,
         entity_ids: list[str],
         data: ServiceData,
+        direct_entity_ids: set[str],
     ) -> tuple[AdaptiveSwitchMap, list[str]]:
         # Create a mapping from switch to entity IDs
         # AdaptiveSwitch → entity_ids mapping
@@ -1909,11 +1915,17 @@ class AdaptiveLightingManager:
                     )
                     skipped.append(entity_id)
                 else:
-                    is_service = self._is_service_light(entity_id)
+                    # Only exclude service lights that were reached via
+                    # indirect (area/device/label) expansion. When a service
+                    # light is *explicitly* targeted via `entity_id`, HA turns
+                    # it on, so AL must too.
+                    is_service = self._is_service_light(entity_id) and (
+                        entity_id not in direct_entity_ids
+                    )
                     if is_service:
                         _LOGGER.debug(
                             "Service light '%s' excluded from intercept "
-                            "turn-on (kept managed for adaptation)",
+                            "turn-on (indirect target; kept managed for adaptation)",
                             entity_id,
                         )
                         skipped.append(entity_id)
@@ -2019,9 +2031,13 @@ class AdaptiveLightingManager:
         # we skip them and rely on the followup call that HA will make
         # with the expanded entity IDs.
 
+        direct_entity_ids = set(
+            cv.ensure_list_csv(service_data.get(ATTR_ENTITY_ID, [])),
+        )
         switch_to_eids, skipped = self._separate_entity_ids(
             entity_ids,
             service_data,
+            direct_entity_ids,
         )
 
         (
@@ -2099,7 +2115,14 @@ class AdaptiveLightingManager:
         # area/label expansion, so it deliberately leaves them off; AL must
         # not turn them on either. They remain in `self.lights` (if managed)
         # and are still adapted when on.
-        skipped_normal = [eid for eid in skipped if not self._is_service_light(eid)]
+        # Exclude service lights from the re-issue ONLY when they were reached
+        # via indirect (area/device/label) expansion. Explicitly targeted
+        # service lights are turned on to match HA's own direct-target behavior.
+        skipped_normal = [
+            eid
+            for eid in skipped
+            if not (self._is_service_light(eid) and eid not in direct_entity_ids)
+        ]
         if skipped_normal and has_intercepted:
             context = self.create_context("skipped")
             _LOGGER.debug(
