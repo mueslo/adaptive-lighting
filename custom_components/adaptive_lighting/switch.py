@@ -1914,23 +1914,19 @@ class AdaptiveLightingManager:
                         switch._intercept,
                     )
                     skipped.append(entity_id)
-                else:
-                    # Only exclude service lights that were reached via
-                    # indirect (area/device/label) expansion. When a service
-                    # light is *explicitly* targeted via `entity_id`, HA turns
-                    # it on, so AL must too.
-                    is_service = self._is_service_light(entity_id) and (
-                        entity_id not in direct_entity_ids
+                # Only service lights reached via indirect area/device/label
+                # expansion are excluded; explicitly targeted ones are kept.
+                elif self._is_service_light(
+                    entity_id,
+                ) and entity_id not in direct_entity_ids:
+                    _LOGGER.debug(
+                        "Service light '%s' excluded from intercept "
+                        "turn-on (indirect target; kept managed for adaptation)",
+                        entity_id,
                     )
-                    if is_service:
-                        _LOGGER.debug(
-                            "Service light '%s' excluded from intercept "
-                            "turn-on (indirect target; kept managed for adaptation)",
-                            entity_id,
-                        )
-                        skipped.append(entity_id)
-                    if not is_service:
-                        switch_to_eids.setdefault(switch, []).append(entity_id)
+                    skipped.append(entity_id)
+                else:
+                    switch_to_eids.setdefault(switch, []).append(entity_id)
         return switch_to_eids, skipped
 
     def _correct_for_multi_light_intercept(
