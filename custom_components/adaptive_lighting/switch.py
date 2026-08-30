@@ -1916,9 +1916,12 @@ class AdaptiveLightingManager:
                     skipped.append(entity_id)
                 # Only service lights reached via indirect area/device/label
                 # expansion are excluded; explicitly targeted ones are kept.
-                elif self._is_service_light(
-                    entity_id,
-                ) and entity_id not in direct_entity_ids:
+                elif (
+                    self._is_service_light(
+                        entity_id,
+                    )
+                    and entity_id not in direct_entity_ids
+                ):
                     _LOGGER.debug(
                         "Service light '%s' excluded from intercept "
                         "turn-on (indirect target; kept managed for adaptation)",
